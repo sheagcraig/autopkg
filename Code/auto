@@ -101,10 +101,14 @@ def valid_override(filename):
     return valid_plist_with_keys(filename, ["Input", "Recipe"])
 
 
-def find_recipe(name, search_dirs):
+def find_recipe(name, search_dirs, all_paths=False):
     '''Search search_dirs for a recipe, first by file/directory
-    naming rules, then by the IDENTIFIER string'''
+    naming rules, then by the IDENTIFIER string. Returns the recipe
+    path with the first match, or a list of paths if all_paths is
+    True.'''
     # search by "Name", using file/directory hierarchy rules
+
+    result = []
     for directory in search_dirs:
         normalized_dir = os.path.abspath(os.path.expanduser(directory))
         patterns  = [
@@ -115,29 +119,53 @@ def find_recipe(name, search_dirs):
             matches = glob.glob(pattern)
             for match in matches:
                 if valid_recipe(match):
-                    return match
+                    result.append(match)
 
-    # search by IDENTIFIER, trying to read every .recipe file
-    for directory in search_dirs:
-        for root, unused_dirs, files in os.walk(
-            os.path.abspath(os.path.expanduser(directory))):
-            for f in files:
-                if f.endswith(".recipe"):
-                    fullpath = os.path.join(root, f)
-                    try:
-                        recipe_plist = FoundationPlist.readPlist(fullpath)
-                    except FoundationPlist.FoundationPlistException:
-                        continue
-                    if "Input" in recipe_plist.keys():
-                        if recipe_plist["Input"].get("IDENTIFIER") == name:
-                            if valid_recipe(fullpath):
-                                return fullpath
+    if not result:
+        # search by IDENTIFIER, trying to read every .recipe file
+        for directory in search_dirs:
+            for root, unused_dirs, files in os.walk(
+                os.path.abspath(os.path.expanduser(directory))):
+                for f in files:
+                    if f.endswith(".recipe"):
+                        fullpath = os.path.join(root, f)
+                        try:
+                            recipe_plist = FoundationPlist.readPlist(fullpath)
+                        except FoundationPlist.FoundationPlistException:
+                            continue
+                        if "Input" in recipe_plist.keys():
+                            if recipe_plist["Input"].get("IDENTIFIER") == name:
+                                if valid_recipe(fullpath):
+                                    result.append(fullpath)
+
+    if all_paths:
+        return result
+    else:
+        if result:
+            return result[0]
     return None
+
+
+def get_identifier(recipe):
+    '''Given a loaded recipe dictionary from load_recipe(), return
+    the identifier. This will return the identifier of the source
+    recipe of an override is present via the 'OVERRIDE_PATH' key.'''
+    identifier = None
+    # pprint.pprint(recipe)
+    if "OVERRIDE_PATH" in recipe.keys():
+        override = FoundationPlist.readPlist(recipe["OVERRIDE_PATH"])
+        identifier = override["Recipe"].get("identifier")
+    
+    # catch both cases of 1) no override, 2) no 'identifier' if override
+    # was built before the time when make-override added identifiers
+    if not identifier:
+        identifier = recipe["Input"].get("IDENTIFIER")
+    return identifier
 
 
 def load_recipe(name, override_dirs, recipe_dirs):
     '''Loads a recipe. If the name contains a path seperator or a file
-    extension , we assume the name is a pathname and attempt to load the
+    extension, we assume the name is a pathname and attempt to load the
     override or recipe from the pathname.
     Otherwise, we treat name as a simple name and search first the override
     directories, then the recipe directories for a matching recipe.
@@ -465,6 +493,7 @@ def repo_add(argv):
 
     log("Recipe search path is: %s"
                             % get_pref("RECIPE_SEARCH_DIRS"))
+    warn_dupe_identifiers(recipe_search_dirs)
 
 
 def repo_delete(argv):
@@ -565,6 +594,8 @@ def repo_update(argv):
         except GitError, err:
             log_err(err)
 
+    warn_dupe_identifiers(repo_dirs)
+
 
 def display_help(argv, subcommands):
     '''Display top-level help'''
@@ -610,20 +641,32 @@ def get_info(argv):
         return -1
 
 
-def list_recipes(argv):
-    '''List all available recipes'''
-    verb = argv[1]
-    p = optparse.OptionParser()
-    p.set_usage("Usage: %s %s [options]\n"
-        "List all the recipes this tool can find automatically."
-        % ("%prog", verb))
+def warn_dupe_identifiers(search_dirs):
+    '''Given a list of recipe search directories, print a warning
+    for any recipes discovered that have multiple identical
+    identifiers.'''
 
-    # Parse arguments
-    add_search_and_override_dir_options(p)
-    options, arguments = p.parse_args(argv[1:])
+    ids_paths = {}
+    # - we don't need overrides for this so we pass an empty list to override_dirs
+    recipe_identifiers = get_recipe_list([], search_dirs, identifiers=True)
+    for r in recipe_identifiers:
+        paths = find_recipe(r, search_dirs, all_paths=True)
+        if len(paths) > 1:
+            if r not in ids_paths.keys():
+                ids_paths[r] = set()
+            for path in paths:
+                ids_paths[r].add(path)
 
-    override_dirs = options.override_dirs or get_override_dirs()
-    search_dirs = options.search_dirs or get_search_dirs()
+    for identifier, paths in ids_paths.items():
+        log_err("WARNING: Recipe identifier '%s' found in multiple recipes "
+                "in search paths:" % identifier)
+        for path in paths:
+            log_err("  - %s" % path)
+
+
+def get_recipe_list(override_dirs, search_dirs, identifiers=False):
+    '''Returns a list of recipe names, optionally by identifiers
+    instead of names.'''
     recipes = set()
 
     # find all valid overrides first
@@ -659,7 +702,39 @@ def list_recipes(argv):
                 recipe_name = os.path.splitext(recipe_name)[0]
                 recipes.add(recipe_name)
 
-    print "\n".join(sorted(list(recipes)))
+    recipe_list = sorted(list(recipes))
+
+    if identifiers:
+        id_list = []
+        for r in recipe_list:
+            # print r
+            recipe_data = load_recipe(r, override_dirs, search_dirs)
+            identifier = get_identifier(recipe_data)
+            id_list.append(identifier)
+        recipe_list = sorted(id_list)
+
+    return recipe_list
+
+def list_recipes(argv):
+    '''List all available recipes'''
+    verb = argv[1]
+    p = optparse.OptionParser()
+    p.set_usage("Usage: %s %s [options]\n"
+        "List all the recipes this tool can find automatically."
+        % ("%prog", verb))
+    p.add_option("--identifiers", action="store_true",
+        help="List recipe identifiers instead of names.")
+
+    # Parse arguments
+    add_search_and_override_dir_options(p)
+    options, arguments = p.parse_args(argv[1:])
+
+    override_dirs = options.override_dirs or get_override_dirs()
+    search_dirs = options.search_dirs or get_search_dirs()
+
+    recipe_list = get_recipe_list(override_dirs, search_dirs, options.identifiers)
+    print "\n".join(recipe_list)
+    warn_dupe_identifiers(search_dirs)
 
 
 def make_override(argv):

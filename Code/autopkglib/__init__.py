@@ -335,6 +335,9 @@ class AutoPackager(object):
                         "Unknown processor '%s'" % step["Processor"])
             # Add arguments to set of variables.
             variables.update(set(step.get("Arguments", dict()).keys()))
+            # Check for any dynamically added variables
+            if "plist_keys" in step.get("Arguments", dict()):
+                    variables.update(set(step.get("Arguments", dict())["plist_keys"].values()))
             # Make sure all required input variables exist.
             for key, flags in processor_class.input_variables.items():
                 if flags["required"] and (key not in variables):

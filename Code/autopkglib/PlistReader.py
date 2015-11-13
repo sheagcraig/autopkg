@@ -152,6 +152,7 @@ class PlistReader(DmgMounter):
                 raise ProcessorError(err)
 
             # Copy each plist_keys' values and assign to new env variables
+            self.output_variables = {}
             self.env["plist_reader_output_variables"] = {}
             for key, val in keys.items():
                 try:
@@ -162,6 +163,9 @@ class PlistReader(DmgMounter):
                     # This one is for documentation/recordkeeping
                     self.env["plist_reader_output_variables"][val] = (
                         self.env[val])
+
+                    self.output_variables[val] = {
+                        "description": "PlistReader output variable."}
                 except KeyError:
                     raise ProcessorError(
                         "Key '%s' could not be found in the plist %s!"
